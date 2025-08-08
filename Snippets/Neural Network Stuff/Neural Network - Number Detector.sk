@@ -50,7 +50,7 @@ command /trainmodel <amount:int>:
 		set {_now} to now
 		set {_train::*} to shuffled {-train::*}
 		
-		loop min({_amount},2500) times:
+		loop min({_amount},size of {-train::*}) times:
 			set {_input::*} to {_train::%loop-counter%} split at "," 
 			set {_label} to ({_input::1} parsed as int)
 			clear {_input::1}
