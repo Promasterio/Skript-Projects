@@ -3,6 +3,7 @@
 # Made by Promasterio :p
 
 # At the bottom of this file there is a 2500 ram variable database to train the ai and another 20 to test the ai!
+# The datasets are images that cover most of the 16 by 16 canvas, so making small blocky digits will be impossible for the ai to guess
 options: 
 	# Do NOT change unless you know what you are doing!
 	
@@ -15,7 +16,7 @@ options:
 	# 16, 32 or 64 neurons is recommended
 	# anything less than 16 will most likely be very inaccurate.
 	# 128 neurons or higher will take insanely long to train with minimal effect
-	hidden_layer: 16 # activation: ReLU
+	hidden_layer: 64 # activation: ReLU
 	
 	output_layer: 10 # activation: Softmax for classification 0-9
 	
@@ -142,13 +143,17 @@ command /val <int:int>:
 		send "Predicted digit is %{_predict}%, answer was %{_label}%!"
 
 # used for drawing your own numbers	
-#on right click on white concrete:
-#	wait 1 tick
-#	set event-block to black concrete
+#on right click holding stick:
+#	set {_target} to player's target block 
+#	{_target} = white concrete or black concrete
+#	set (blocks in radius 1 around {_target} where [input = white concrete]) to black concrete
+#	
+#	
+#on right click holding carrot on a stick:
+#	set {_target} to player's target block 
+#	{_target} = white concrete or black concrete
+#	set (blocks in radius sqrt(2) around {_target} where [input = black concrete]) to white concrete
 	
-#on right click on black concrete:
-#	wait 1 tick
-#	set event-block to white concrete
 
 # makes the ai model guess what number you have drawn :p
 # AGAIN MAKE SURE THE {_loc} VARIABLE MATCHES WHEREVER YOU PUT THIS DRAWABLE BOARD
@@ -174,7 +179,7 @@ command /predict_number:
 		
 # this teaches the AI what number your drawing represents
 # useful if the AI guessed
-command /teach_number <answer:int>:
+command /teach_number <answer:int> [<learning_rate:num={@learning_rate}>]:
 	permission: op
 	trigger:
 		set {_loc} to location(0,-43,0,"testworld")
@@ -189,11 +194,7 @@ command /teach_number <answer:int>:
 				add 1 to {_pixels::*}
 			else:
 				add 0 to {_pixels::*}
-		send "&aTraining the AI..."
-		loop 5 times:
-			train_network({_pixels::*}, {_answer})
-			send "Finished training %loop-counter% / 5"
-			wait 5 ticks
+		train_network({_pixels::*}, {_answer}, {_learning_rate})
 		send "&aFinished training the AI! Try /predict_number again!"
 		
 		
