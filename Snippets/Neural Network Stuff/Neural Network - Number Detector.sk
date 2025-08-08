@@ -175,6 +175,7 @@ command /predict_number:
 # this teaches the AI what number your drawing represents
 # useful if the AI guessed
 command /teach_number <answer:int>:
+	permission: op
 	trigger:
 		set {_loc} to location(0,-43,0,"testworld")
 		loop 256 times:
