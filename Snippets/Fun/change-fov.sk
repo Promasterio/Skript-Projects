@@ -1,0 +1,50 @@
+# Simple zoom skript
+# By Promasterio
+# Tested on mc 1.21+
+# Dependencies: Skript, Skript-reflect
+
+options:
+	scrollSpeed: 0.08
+
+command /spyglass [<p: player>]:
+	permission: op
+	trigger:
+		set {_target} to ({_p} ? event-player)
+		give {_target} 1 of amethyst shard named "&6Better Spyglass" with lore "&7Scroll to zoom"
+
+on right click holding amethyst shard:
+	name of event-item = "&6Better Spyglass"
+	cancel event
+	set {_bool} to (metadata "betterSpyglass;isEnabled" of player) ? false
+	toggle {_bool}
+	set (metadata "betterSpyglass;isEnabled" of player) to {_bool}
+	while (metadata "betterSpyglass;isEnabled" of player) = true:
+		set {_zoom} to (metadata "betterSpyglass;zoom" of player) ? 1
+		if {_zoom} != {_lastZoom}:
+			setFOVScale(player, {_zoom})
+		set {_lastZoom} to {_zoom}
+		send action bar "&6Current zoom: %{_zoom}%x" to player
+		wait 1 tick
+	setFOVScale(player, 1)
+	set (metadata "betterSpyglass;zoom" of player) to 1
+	send action bar " " to player
+
+on held item change:
+	(metadata "betterSpyglass;isEnabled" of player) = true
+	cancel event
+	play sound "item.spyglass.use" at volume 2 to player
+	set {_delta} to mod(((index of event-slot) - (index of currently selected hotbar slot) + 13), 9) - 4
+	set {_sign} to {_delta} / abs({_delta})
+	set {_factor} to 1 + (-{@scrollSpeed} * {_sign})
+	set (metadata "betterSpyglass;zoom" of player) to clamp((metadata "betterSpyglass;zoom" of player) * {_factor}, 2/3, 10)
+
+# helper function
+import:
+	net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket
+
+# @scale is between 2/3 and 10
+local function setFOVScale(p: player, scale: num):
+	set {_nmsPlayer} to {_p}.getHandle()
+	set {_abilities} to {_nmsPlayer}.getAbilities()
+	{_abilities}.setWalkingSpeed({_scale} / (20 - 10 * {_scale}))
+	{_nmsPlayer}.connection.send(new ClientboundPlayerAbilitiesPacket({_abilities}))
