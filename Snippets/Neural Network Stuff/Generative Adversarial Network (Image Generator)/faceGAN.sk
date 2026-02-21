@@ -1,0 +1,422 @@
+# ------------------------------------------------------------- #
+#                                                               #
+#          Generative Adversarial Network in Skript             #
+#                                                               #
+# ------------------------------------------------------------- #
+#                                                               #
+#    generates map images of human faces                        #
+#    trained on the celebA database                             #
+#                                                               #
+#    -> Made by: Promasterio                                    #
+#    -> Dependencies: Skript (v2.14.1), Skript-reflect (v2.6.3) #
+#    -> Server Software: Paper (v1.21.8)                        #
+#                                                               #
+# ------------------------------------------------------------- #
+
+options:
+	# Speeds up the code from ~340 seconds to ~2 seconds
+	# If you want a pure skript experience, set this to false
+	use-java-convT-looping: true
+
+    # IMPORTANT
+    # Make sure the path points to the model
+    # Named: model.bin and model.json
+    model-path: plugins/Skript/scripts/GAN/model/
+
+import:
+
+	net.minecraft.network.protocol.game.ClientboundMapItemDataPacket
+	net.minecraft.world.level.saveddata.maps.MapId
+	net.minecraft.world.level.saveddata.maps.MapItemSavedData$MapPatch
+
+	org.bukkit.Bukkit
+	org.bukkit.map.MapPalette
+
+	com.google.gson.JsonParser
+
+	java.io.File
+	java.io.FileInputStream
+	java.io.FileWriter
+	java.nio.ByteBuffer
+	java.nio.ByteOrder
+	java.nio.FloatBuffer
+	java.nio.file.Files
+	java.lang.String as JString
+	java.lang.Math
+	java.lang.System
+	java.lang.Runtime
+	java.util.Random
+	java.util.Arrays
+	java.awt.Color
+	java.net.URLClassLoader
+
+on load:
+	locally suppress constant condition warning
+
+	parse if {@use-java-convT-looping} = true:
+
+		{-facegan::convT_method} isn't set
+		broadcast "&e Compiling Java ConvTranspose kernel..."
+		
+		# convT java speedup source code
+		set {_src} to "import java.nio.FloatBuffer; public class FaceGanKernel { public static void convTranspose(FloatBuffer data, FloatBuffer newData, FloatBuffer weights, long inC, long h, long w, long outC, long outH, long outW, long outArea, long k, long k2, long wStride, long stride, long pad) { for (int ic = 0; ic < (int)inC; ic++) { int icBase = ic * (int)h * (int)w; int icWBase = ic * (int)wStride; for (int iy = 0; iy < (int)h; iy++) { int oyBase = iy * (int)stride - (int)pad; int iyBase = icBase + iy * (int)w; for (int ix = 0; ix < (int)w; ix++) { float inVal = data.get(iyBase + ix); if (inVal == 0f) continue; int oxBase = ix * (int)stride - (int)pad; for (int oc = 0; oc < (int)outC; oc++) { int wBase = icWBase + oc * (int)k2; int outBase = oc * (int)outArea; for (int ky = 0; ky < (int)k; ky++) { int oy = oyBase + ky; if (oy < 0 || oy >= (int)outH) continue; int outYBase = outBase + oy * (int)outW; int wKyBase = wBase + ky * (int)k; for (int kx = 0; kx < (int)k; kx++) { int ox = oxBase + kx; if (ox < 0 || ox >= (int)outW) continue; int outIdx = outYBase + ox; newData.put(outIdx, newData.get(outIdx) + inVal * weights.get(wKyBase + kx)); } } } } } } } }"
+
+		set {_tmpDir} to new File(System.getProperty("java.io.tmpdir") + "/facegan_kernel")
+		{_tmpDir}.mkdirs()
+		set {_outDir} to {_tmpDir}.getAbsolutePath()
+		set {_srcFile} to new File({_outDir} + "/FaceGanKernel.java")
+		set {_fw} to new FileWriter({_srcFile})
+		{_fw}.write({_src})
+		{_fw}.close()
+
+		# Shell out to javac
+		set {_proc} to Runtime.getRuntime().exec(["javac", "-d", {_outDir}, {_srcFile}.getAbsolutePath()])
+		{_proc}.waitFor()
+
+		if {_proc}.exitValue() != 0:
+			broadcast "&c javac failed (exit code %{_proc}.exitValue()%). Falling back to Skript convT."
+			set {-facegan::convT_method} to null
+		else:
+			set {_loader} to new URLClassLoader([{_tmpDir}.toURI().toURL()])
+			set {_class} to {_loader}.loadClass("FaceGanKernel")
+			set {-facegan::convT_method} to {_class}.getMethods()[0]
+			broadcast "&a Java accelerated ConvTranspose compiled and ready!"
+
+	else:
+		clear {-facegan::convT_method}
+
+
+	parse if {facegan::layerCount} isn't set:
+
+		broadcast "&e Loading binary weights into memory (using zero copy)..."
+		set {_jsonFile} to new File("{@model-path}model.json")
+		set {_binFile} to new File("{@model-path}model.bin")
+		if {_jsonFile}.exists() is false:
+			broadcast "&c Error: Cannot find model.json!"
+			stop
+			
+		set {_bytes} to Files.readAllBytes({_jsonFile}.toPath())
+		set {_jsonTxt} to new JString({_bytes}, "UTF-8")
+		set {_parser} to new JsonParser()
+		set {_layersMeta} to {_parser}.parse({_jsonTxt}).getAsJsonArray()
+		
+		set {_endian} to ByteOrder.LITTLE_ENDIAN
+		set {_fis} to new FileInputStream({_binFile})
+		set {_channel} to {_fis}.getChannel()
+		set {_fileSize} to {_channel}.size()
+		set {_buf} to ByteBuffer.allocateDirect({_fileSize})
+		{_buf}.order({_endian})
+		{_channel}.read({_buf})
+		{_fis}.close()
+		
+		clear {facegan::*}
+		set {_len} to {_layersMeta}.size()
+		set {_i} to 0
+		while {_i} < {_len}:
+			set {_meta} to {_layersMeta}.get({_i}).getAsJsonObject()
+			set {_type} to {_meta}.get("type").getAsString()
+			set {facegan::layer::%{_i}%::type} to {_type}
+			
+			if {_type} is "convT":
+				set {facegan::layer::%{_i}%::inC} to {_meta}.get("in").getAsInt()
+				set {facegan::layer::%{_i}%::outC} to {_meta}.get("out").getAsInt()
+				set {facegan::layer::%{_i}%::k} to {_meta}.get("k").getAsInt()
+				set {facegan::layer::%{_i}%::stride} to {_meta}.get("stride").getAsInt()
+				set {facegan::layer::%{_i}%::pad} to {_meta}.get("padding").getAsInt()
+				set {_weightCount} to {_meta}.get("weight_count").getAsInt()
+				set {_biasCount} to {_meta}.get("bias_count").getAsInt()
+				set {_offset} to {_meta}.get("offset").getAsInt()
+				
+				set {_sliceBias} to {_buf}.duplicate()
+				{_sliceBias}.position({_offset})
+				set {_sliceBias} to {_sliceBias}.slice()
+				{_sliceBias}.order({_endian})
+				set {_fBufBias} to {_sliceBias}.asFloatBuffer()
+				{_fBufBias}.limit({_biasCount})
+				set {facegan::layer::%{_i}%::bias} to {_fBufBias}
+				
+				set {_sliceWeights} to {_buf}.duplicate()
+				{_sliceWeights}.position({_offset} + ({_biasCount} * 4))
+				set {_sliceWeights} to {_sliceWeights}.slice()
+				{_sliceWeights}.order({_endian})
+				set {_fBufWeights} to {_sliceWeights}.asFloatBuffer()
+				{_fBufWeights}.limit({_weightCount})
+				set {facegan::layer::%{_i}%::weights} to {_fBufWeights}
+			add 1 to {_i}
+		set {facegan::layerCount} to {_len}
+		broadcast "&a Model loaded instantly! %{_len}% layers mapped to RAM."
+
+	
+	create new section stored in {-facegan::async_gen}:
+
+		broadcast "&bGenerating a face..."
+		set {_startTime} to System.currentTimeMillis()
+		
+		# Create latent vector using 100 random gaussian values
+		set {_c} to 100
+		set {_h} to 1
+		set {_w} to 1
+		
+		set {_rand} to new Random()
+		set {_data} to FloatBuffer.allocate(100)
+		
+		loop 100 times:
+			{_data}.put(((loop-counter-1) - 1), {_rand}.nextGaussian())
+			
+		loop {facegan::layerCount} times:
+
+			set {_lc} to (loop-counter-1) - 1
+			set {_type} to {facegan::layer::%{_lc}%::type}
+			set {_layerStart} to System.currentTimeMillis()
+			
+			# Transposed Convolution
+			# This is a learnable upsampling technique that increases 
+			# image resolution by spreading input values into a larger 
+			# output grid via a kernel.
+			if {_type} is "convT":
+				set {_inC} to {facegan::layer::%{_lc}%::inC}
+				set {_outC} to {facegan::layer::%{_lc}%::outC}
+				set {_k} to {facegan::layer::%{_lc}%::k}
+				set {_stride} to {facegan::layer::%{_lc}%::stride}
+				set {_pad} to {facegan::layer::%{_lc}%::pad}
+				set {_weights} to {facegan::layer::%{_lc}%::weights}
+				set {_bias} to {facegan::layer::%{_lc}%::bias}
+				
+				set {_outH} to ((({_h} - 1) * {_stride}) - (2 * {_pad}) + {_k})
+				set {_outW} to ((({_w} - 1) * {_stride}) - (2 * {_pad}) + {_k})
+				set {_outArea} to {_outH} * {_outW}
+				set {_newData} to FloatBuffer.allocate({_outC} * {_outArea})
+				
+				# Bias init
+				loop {_outC} times:
+					set {_bVal} to {_bias}.get((loop-counter-2) - 1)
+					loop {_outArea} times:
+						{_newData}.put(((((loop-counter-2) - 1) * {_outArea}) + ((loop-counter-3) - 1)), {_bVal})
+				
+				set {_k2} to {_k} * {_k}
+				set {_wStride} to {_outC} * {_k2}
+				
+				# FAST PATH (one java call replaces the entire 7 deep skript loop lmao)
+				if {-facegan::convT_method} is set:
+					{-facegan::convT_method}.invoke(null, {_data}, {_newData}, {_weights}, {_inC}, {_h}, {_w}, {_outC}, {_outH}, {_outW}, {_outArea}, {_k}, {_k2}, {_wStride}, {_stride}, {_pad})
+				
+				# SLOW PATH (WELCOME TO HELL)
+				else:
+					set {_hw} to {_h} * {_w}
+
+					loop {_inC} times:
+						set {_ic0} to (loop-counter-2) - 1
+						set {_icBase} to {_ic0} * {_hw}
+						set {_icWBase} to {_ic0} * {_wStride}
+
+						loop {_h} times:
+							set {_iy0} to (loop-counter-3) - 1
+							set {_oyBase} to ({_iy0} * {_stride}) - {_pad}
+							set {_iyBase} to {_icBase} + ({_iy0} * {_w})
+
+							loop {_w} times:
+								set {_inVal} to {_data}.get({_iyBase} + ((loop-counter-4) - 1))
+								{_inVal} != 0
+
+								set {_oxBase} to (((loop-counter-4) - 1) * {_stride}) - {_pad}
+
+								loop {_outC} times:
+									set {_wBase} to {_icWBase} + (((loop-counter-5) - 1) * {_k2})
+									set {_outBase} to ((loop-counter-5) - 1) * {_outArea}
+
+									loop {_k} times:
+										({_oyBase} + ((loop-counter-6) - 1)) >= 0
+										({_oyBase} + ((loop-counter-6) - 1)) < {_outH}
+
+										set {_outYBase} to {_outBase} + (({_oyBase} + ((loop-counter-6) - 1)) * {_outW})
+										set {_wKyBase} to {_wBase} + (((loop-counter-6) - 1) * {_k})
+
+										loop {_k} times:
+											({_oxBase} + ((loop-counter-7) - 1)) >= 0
+											({_oxBase} + ((loop-counter-7) - 1)) < {_outW}
+
+											set {_outIdx} to ({_outYBase} + {_oxBase} + ((loop-counter-7) - 1))
+											{_newData}.put({_outIdx}, ({_newData}.get({_outIdx}) + ({_inVal} * {_weights}.get({_wKyBase} + ((loop-counter-7) - 1)))))
+				
+				set {_c} to {_outC}
+				set {_h} to {_outH}
+				set {_w} to {_outW}
+				set {_data} to {_newData}
+				
+			# ReLU
+			# this is an activation function that outputs
+			# the input directly if it is positive, 
+			# otherwise, it outputs zero.
+			else if {_type} is "relu":
+				loop ({_c} * {_h} * {_w}) times:
+					if {_data}.get((loop-counter-2) - 1) < 0:
+						{_data}.put(((loop-counter-2) - 1), 0)
+					
+			# Tanh
+			# this is an activation function that maps 
+			# input values to a range between -1 and 1, 
+			# centering the data around zero.
+			else if {_type} is "tanh":
+				loop ({_c} * {_h} * {_w}) times:
+					{_data}.put(((loop-counter-2) - 1), Math.tanh({_data}.get((loop-counter-2) - 1)))
+
+			set {_layerTime} to System.currentTimeMillis() - {_layerStart}
+			broadcast "&7 -> Layer %{_lc}% (%{_type}%) done in %{_layerTime}%ms"
+			
+		broadcast "&a Math complete! Converting to Map Format..."
+		set {_scaleStart} to System.currentTimeMillis()
+	
+		# Remap tanh output (-1, 1) to RGB range (0, 255)
+		loop 4096 times:
+			set {_lc} to (loop-counter-1) - 1
+			{_data}.put({_lc}, (({_data}.get({_lc}) + 1) * 127.5))
+			{_data}.put((4096 + {_lc}), (({_data}.get(4096 + {_lc}) + 1) * 127.5))
+			{_data}.put((8192 + {_lc}), (({_data}.get(8192 + {_lc}) + 1) * 127.5))
+		
+		set {_srcW} to 64
+		set {_srcH} to 64
+		set {_dstW} to 128
+		set {_dstH} to 128
+		set {_dstArea} to {_dstW} * {_dstH}
+		
+		set {_upData} to FloatBuffer.allocate({_dstArea} * 3)
+		set {_rOff} to 0
+		set {_gOff} to {_dstArea}
+		set {_bOff} to {_dstArea} * 2
+		
+		# nearest neighbour 2x2 upsample
+		loop {_srcH} times:
+			loop {_srcW} times:
+				set {_sx} to (loop-counter-2) - 1
+				set {_sy} to (loop-counter-1) - 1
+				set {_sIdx} to ({_sy} * {_srcW}) + {_sx}
+				
+				set {_rVal} to {_data}.get({_sIdx})
+				set {_gVal} to {_data}.get(4096 + {_sIdx})
+				set {_bVal} to {_data}.get(8192 + {_sIdx})
+				
+				set {_topY} to {_sy} * 2
+				set {_leftX} to {_sx} * 2
+				
+				set {_pos} to ({_topY} * {_dstW}) + {_leftX}
+				{_upData}.put(({_rOff} + {_pos}), {_rVal})
+				{_upData}.put(({_gOff} + {_pos}), {_gVal})
+				{_upData}.put(({_bOff} + {_pos}), {_bVal})
+				
+				set {_pos} to ({_topY} * {_dstW}) + ({_leftX} + 1)
+				{_upData}.put(({_rOff} + {_pos}), {_rVal})
+				{_upData}.put(({_gOff} + {_pos}), {_gVal})
+				{_upData}.put(({_bOff} + {_pos}), {_bVal})
+				
+				set {_pos} to (({_topY} + 1) * {_dstW}) + {_leftX}
+				{_upData}.put(({_rOff} + {_pos}), {_rVal})
+				{_upData}.put(({_gOff} + {_pos}), {_gVal})
+				{_upData}.put(({_bOff} + {_pos}), {_bVal})
+				
+				set {_pos} to (({_topY} + 1) * {_dstW}) + ({_leftX} + 1)
+				{_upData}.put(({_rOff} + {_pos}), {_rVal})
+				{_upData}.put(({_gOff} + {_pos}), {_gVal})
+				{_upData}.put(({_bOff} + {_pos}), {_bVal})
+		
+		set {_mapBytes} to new byte[{_dstArea}]
+
+		set {_scaleTime} to System.currentTimeMillis() - {_scaleStart}
+		broadcast "&7 -> Nearest neighbour rescale done in %{_scaleTime}%ms"
+
+		set {_ditherStart} to System.currentTimeMillis()
+
+		# Floyd–Steinberg dithering
+		# this creates the illusion of more colors 
+		# by arranging pixels from a limited palette 
+		# in patterns that trick the eye into seeing smooth gradients.
+		loop {_dstH} times:
+			set {_y} to (loop-counter-1) - 1
+			
+			loop {_dstW} times:
+				set {_x} to (loop-counter-2) - 1
+				set {_idx} to ({_y} * {_dstW}) + {_x}
+				
+				set {_rF} to {_upData}.get({_rOff} + {_idx})
+				set {_gF} to {_upData}.get({_gOff} + {_idx})
+				set {_bF} to {_upData}.get({_bOff} + {_idx})
+				
+				set {_rC} to clamp({_rF}, 0, 255)
+				set {_gC} to clamp({_gF}, 0, 255)
+				set {_bC} to clamp({_bF}, 0, 255)
+				
+				set {_jColor} to new Color({_rC}, {_gC}, {_bC})
+				set {_mcByte} to MapPalette.matchColor({_jColor})
+				set {_matchedColor} to MapPalette.getColor({_mcByte})
+				
+				set {_mapBytes}[{_idx}] to {_mcByte}
+				
+				set {_errR} to {_rC} - {_matchedColor}.getRed()
+				set {_errG} to {_gC} - {_matchedColor}.getGreen()
+				set {_errB} to {_bC} - {_matchedColor}.getBlue()
+				
+				if {_x} < ({_dstW} - 1):
+					set {_nIdx} to {_idx} + 1
+					{_upData}.put(({_rOff} + {_nIdx}), ({_upData}.get({_rOff} + {_nIdx}) + ({_errR} * 0.4375)))
+					{_upData}.put(({_gOff} + {_nIdx}), ({_upData}.get({_gOff} + {_nIdx}) + ({_errG} * 0.4375)))
+					{_upData}.put(({_bOff} + {_nIdx}), ({_upData}.get({_bOff} + {_nIdx}) + ({_errB} * 0.4375)))
+				
+				if {_y} < ({_dstH} - 1):
+					if {_x} > 0:
+						set {_nIdx} to {_idx} + ({_dstW} - 1)
+						{_upData}.put(({_rOff} + {_nIdx}), ({_upData}.get({_rOff} + {_nIdx}) + ({_errR} * 0.1875)))
+						{_upData}.put(({_gOff} + {_nIdx}), ({_upData}.get({_gOff} + {_nIdx}) + ({_errG} * 0.1875)))
+						{_upData}.put(({_bOff} + {_nIdx}), ({_upData}.get({_bOff} + {_nIdx}) + ({_errB} * 0.1875)))
+					
+					set {_nIdx} to {_idx} + {_dstW}
+					{_upData}.put(({_rOff} + {_nIdx}), ({_upData}.get({_rOff} + {_nIdx}) + ({_errR} * 0.3125)))
+					{_upData}.put(({_gOff} + {_nIdx}), ({_upData}.get({_gOff} + {_nIdx}) + ({_errG} * 0.3125)))
+					{_upData}.put(({_bOff} + {_nIdx}), ({_upData}.get({_bOff} + {_nIdx}) + ({_errB} * 0.3125)))
+					
+					if {_x} < ({_dstW} - 1):
+						set {_nIdx} to {_idx} + ({_dstW} + 1)
+						{_upData}.put(({_rOff} + {_nIdx}), ({_upData}.get({_rOff} + {_nIdx}) + ({_errR} * 0.0625)))
+						{_upData}.put(({_gOff} + {_nIdx}), ({_upData}.get({_gOff} + {_nIdx}) + ({_errG} * 0.0625)))
+						{_upData}.put(({_bOff} + {_nIdx}), ({_upData}.get({_bOff} + {_nIdx}) + ({_errB} * 0.0625)))
+
+		set {_ditherTime} to System.currentTimeMillis() - {_ditherStart}
+		broadcast "&7 -> Floyd steinberg dithering done in %{_ditherTime}%ms"
+		
+		set {_totalTime} to (System.currentTimeMillis() - {_startTime}) / 1000
+		broadcast "&a&lGeneration finished in %{_totalTime}% seconds!"
+
+		return {_mapBytes}
+
+command /genface:
+	permission: op
+	trigger:
+
+		if {facegan::layerCount} is not set:
+			send "&cLoad the model first using /loadfacegan"
+			stop
+		
+		set {_item} to filled map named "&6Skript Generative AI Canvas"
+		set {_meta} to {_item}.getItemMeta()
+		{_meta}.setMapId(-1)
+		{_item}.setItemMeta({_meta})
+		give player {_item}
+
+		set {_taskId} to random uuid
+		set {-task::%{_taskId}%} to {_taskId}
+		debugBar(player, {_taskId})
+
+		run section {-facegan::async_gen} async and store result in {_mapBytes} and wait
+		clear {-task::%{_taskId}%}
+
+		set {_mapId} to new MapId(-1)
+		set {_patch} to new MapPatch(0, 0, 128, 128, {_mapBytes})
+		set {_packet} to new ClientboundMapItemDataPacket({_mapId}, 0, false, null, {_patch})
+
+		player.getHandle().connection.send({_packet})
+
+# i dont care that this debug bar is total shit
+local function debugBar(p: player, taskId: string):
+	set {_start} to now
+	while {-task::%{_taskId}%} is set:
+		send action bar "&6Time Elapsed: %seconds of (time since {_start})%s" to {_p}
+		wait 1 tick
+	send action bar "&aImage generated in: %seconds of (time since {_start})%s" to {_p}

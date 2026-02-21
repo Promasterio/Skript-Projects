@@ -1,0 +1,72 @@
+[
+  {
+    "type": "convT",
+    "in": 100,
+    "out": 512,
+    "k": 4,
+    "stride": 1,
+    "padding": 0,
+    "weight_count": 819200,
+    "bias_count": 512,
+    "offset": 0
+  },
+  {
+    "type": "relu"
+  },
+  {
+    "type": "convT",
+    "in": 512,
+    "out": 256,
+    "k": 4,
+    "stride": 2,
+    "padding": 1,
+    "weight_count": 2097152,
+    "bias_count": 256,
+    "offset": 3278848
+  },
+  {
+    "type": "relu"
+  },
+  {
+    "type": "convT",
+    "in": 256,
+    "out": 128,
+    "k": 4,
+    "stride": 2,
+    "padding": 1,
+    "weight_count": 524288,
+    "bias_count": 128,
+    "offset": 11668480
+  },
+  {
+    "type": "relu"
+  },
+  {
+    "type": "convT",
+    "in": 128,
+    "out": 64,
+    "k": 4,
+    "stride": 2,
+    "padding": 1,
+    "weight_count": 131072,
+    "bias_count": 64,
+    "offset": 13766144
+  },
+  {
+    "type": "relu"
+  },
+  {
+    "type": "convT",
+    "in": 64,
+    "out": 3,
+    "k": 4,
+    "stride": 2,
+    "padding": 1,
+    "weight_count": 3072,
+    "bias_count": 3,
+    "offset": 14290688
+  },
+  {
+    "type": "tanh"
+  }
+]
