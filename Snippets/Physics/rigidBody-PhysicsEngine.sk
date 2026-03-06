@@ -14,11 +14,11 @@
 # ------------------------------------------------------------- #
 
 options:
-	ANIMATION_DT: 0.05	 # 1 tick
-	PHYSICS_SUBSTEPS: 5	# i would recommend higher but it was just too slow for my demo lol (+20fps per substep)
+	ANIMATION_DT: 0.05	   # 1 tick
+	PHYSICS_SUBSTEPS: 5	   # i would recommend higher but it was just too slow for my demo lol (+20fps per substep)
 	SOLVER_ITERATIONS: 1   # constraint solver passes per physics step (more = stiffer stacks) (Also higher would be more optimal but its so slow...)
-	BAUMGARTE_BIAS: 0.2	# position-error correction strength (prevents slow sinking)
-	FRICTION_COEFF: 0.5	# coulomb friction coefficient
+	BAUMGARTE_BIAS: 0.2	   # position-error correction strength (prevents slow sinking)
+	FRICTION_COEFF: 0.5	   # coulomb friction coefficient
 	RESTITUTION: 0.2	   # bounciness (keep low or stacks become unstable)
 	COLLISION_MARGIN: 0.02 # skin depth (contact is detected this much before actual overlap)
 	
