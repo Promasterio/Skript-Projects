@@ -1,0 +1,340 @@
+# ------------------------------------------------------------- #
+#                                                               #
+#            Rigid Body Physics Engine in Skript                #
+#                                                               #
+# ------------------------------------------------------------- #
+#                                                               #
+#    Using: SAT collision detection, impulse-based solver       #
+#    and Baumgarte stabilization                                #
+#                                                               #
+#    -> Made by: Promasterio                                    #
+#    -> Dependencies: Skript (v2.14.3)                          #
+#    -> Server Software: Paper (v1.21.11)                       #
+#                                                               #
+# ------------------------------------------------------------- #
+
+options:
+	ANIMATION_DT: 0.05	 # 1 tick
+	PHYSICS_SUBSTEPS: 5	# i would recommend higher but it was just too slow for my demo lol (+20fps per substep)
+	SOLVER_ITERATIONS: 1   # constraint solver passes per physics step (more = stiffer stacks) (Also higher would be more optimal but its so slow...)
+	BAUMGARTE_BIAS: 0.2	# position-error correction strength (prevents slow sinking)
+	FRICTION_COEFF: 0.5	# coulomb friction coefficient
+	RESTITUTION: 0.2	   # bounciness (keep low or stacks become unstable)
+	COLLISION_MARGIN: 0.02 # skin depth (contact is detected this much before actual overlap)
+	
+on async load:
+	set {-phys.dt} to {@ANIMATION_DT} / {@PHYSICS_SUBSTEPS}
+	set {-phys.halfdt} to 0.5 * {-phys.dt}
+	set {-phys.gravity} to vector(0.0, -9.81, 0.0) * {-phys.dt}
+	set {-phys.bias} to {@BAUMGARTE_BIAS} / {@ANIMATION_DT}
+	
+	# change this using `!send vector from center of me's location` to change its offset to a global space
+	set {-phys.worldPos} to vector(-26.5, 64.0, 33.5) 
+	
+	set {-vec3.ZERO} to vector(0.0, 0.0, 0.0)
+	set {-vec3.HALF} to vector(0.5, 0.5, 0.5)
+	set {-vec3.ONE} to vector(1.0, 1.0, 1.0)
+	set {-vec3.PLANE_X} to vector(1.0, 0.0, 0.0)
+	set {-vec3.PLANE_Y} to vector(0.0, 1.0, 0.0)
+	set {-vec3.PLANE_Z} to vector(0.0, 0.0, 1.0)
+	
+	set {-quat.IDENTITY} to quaternion(1.0, 0.0, 0.0, 0.0)
+	
+	set {-list.blocks::*} to (command block, repeating command block, chain command block, test block, test instance block, jigsaw block, structure block)
+	
+on unload:
+	reset_physics_engine()
+	
+every tick:
+	loop {@PHYSICS_SUBSTEPS} times:
+		set {_await} to step_physics()
+	for {_cube}, {_entity} in {-phys.cubes::*}:
+		set interpolation delay of {_entity} to 0 ticks
+		set left transformation rotation of {_entity} to {-phys.cubes::%{_cube}%::quat}
+		teleport {_entity} to location of ({-phys.cubes::%{_cube}%::pos}+{-phys.worldPos}) in world("world")
+		
+command /phys-test:tower [<amount:int=5>]:
+	permission: op
+	trigger:
+		reset_physics_engine()
+		loop {_amount} times:
+			set {_x} to random number between -0.05 and 0.05
+			set {_z} to random number between -0.05 and 0.05
+			set {_y} to 0.6 + (loop-number - 1) * 1.1
+			set {_id} to create_cube(vector({_x}, {_y}, {_z}), vector(1,1,1), 1.0)
+
+		set {_bullet} to create_cube(vector(-5.0, 3.0, 0.3), vector(1,1,1), 1.0)
+		set {-phys.cubes::%{_bullet}%::vel} to vector(14.0, 0.5, 0.0)
+		set {-phys.cubes::%{_bullet}%::omega} to vector(2.0, 5.0, 8.0)
+
+		send "Spawned tower of %{_amount}% cubes and a bullet."
+		
+command /phys-test:dominoes:
+	permission: op
+	trigger:
+		reset_physics_engine()
+		set {_amount} to 20
+		set {_radius} to 4.0
+		loop {_amount} times:
+			set {_angle} to (loop-number - 1) * (360 / {_amount})
+			set {_x} to {_radius} * cos({_angle})
+			set {_z} to {_radius} * sin({_angle})
+			set {_id} to create_cube(vector({_x}, 0.6, {_z}), vector(0.15, 1.2, 0.5), 1.0)
+			set {-phys.cubes::%{_id}%::quat} to axisAngle((-1 * ({_angle} + 90)), {-vec3.PLANE_Y})
+
+		set {_bullet} to create_cube(vector({_radius}, 0.6, 0.5), vector(0.2, 0.2, 0.2), 0.5)
+		set {-phys.cubes::%{_bullet}%::vel} to vector(0.0, 0.0, 3.0)
+		send  "Spawned circle with radius %{_radius}% and %{_amount}% dominoes and a bullet."
+		
+command /phys-test:spawner [<amount:int=20>]:
+	permission: op
+	trigger:
+		reset_physics_engine()
+		send "Spawning %{_amount}% blocks."
+		loop {_amount} times:
+			set {_size} to vector((random number between 0.4 and 1.2), (random number between 0.4 and 1.2), (random number between 0.4 and 1.2))
+			set {_weight} to squared length of {_size}
+			set {_id} to create_cube(vector(0, 8, 0), {_size}, {_weight})
+			set {-phys.cubes::%{_id}%::omega} to random vector * 10
+			wait 5 ticks
+		send "Done spawning %{_amount}% blocks."
+		
+function reset_physics_engine():
+	for index {_contact} in {-phys.contacts::*}:
+		clear {-phys.contacts::%{_contact}%::*}, {-phys.contacts::%{_contact}%}
+	for {_cube}, {_entity} in {-phys.cubes::*}:
+		kill {_entity}
+		clear {-phys.cubes::%{_cube}%::*}, {-phys.cubes::%{_cube}%}
+	
+function multiply_quaternions(q1: quaternion, q2: quaternion) :: quaternion:
+	set {_w1} to w of {_q1}
+	set {_x1} to x of {_q1}
+	set {_y1} to y of {_q1}
+	set {_z1} to z of {_q1}
+
+	set {_w2} to w of {_q2}
+	set {_x2} to x of {_q2}
+	set {_y2} to y of {_q2}
+	set {_z2} to z of {_q2}
+
+	return quaternion(({_w1} * {_w2} - {_x1} * {_x2} - {_y1} * {_y2} - {_z1} * {_z2}), ({_w1} * {_x2} + {_x1} * {_w2} + {_y1} * {_z2} - {_z1} * {_y2}), ({_w1} * {_y2} - {_x1} * {_z2} + {_y1} * {_w2} + {_z1} * {_x2}), ({_w1} * {_z2} + {_x1} * {_y2} - {_y1} * {_x2} + {_z1} * {_w2}))
+
+# since all matrixes we use have 3 columns, we can just use a list of 3 vectors (3x3)
+function get_rotation_matrix(q: quaternion) :: vectors:
+	set {_w} to w of {_q}
+	set {_x} to x of {_q}
+	set {_y} to y of {_q}
+	set {_z} to z of {_q}
+
+	return vector((1 - 2*{_y}^2 - 2*{_z}^2), (2*{_x}*{_y} - 2*{_w}*{_z}), (2*{_x}*{_z} + 2*{_w}*{_y})), vector((2*{_x}*{_y} + 2*{_w}*{_z}), (1 - 2*{_x}^2 - 2*{_z}^2), (2*{_y}*{_z} - 2*{_w}*{_x})), vector((2*{_x}*{_z} - 2*{_w}*{_y}), (2*{_y}*{_z} + 2*{_w}*{_x}), (1 - 2*{_x}^2 - 2*{_y}^2))
+		
+function get_inverse_inertia_world(inv_i:vector, rot_matrix: vectors) :: vectors:
+	set {_T1} to {_rot_matrix::1} * {_inv_i}
+	set {_T2} to {_rot_matrix::2} * {_inv_i}
+	set {_T3} to {_rot_matrix::3} * {_inv_i}
+	
+	return vector(({_T1} dot {_rot_matrix::1}), ({_T1} dot {_rot_matrix::2}), ({_T1} dot {_rot_matrix::3})), vector(({_T2} dot {_rot_matrix::1}), ({_T2} dot {_rot_matrix::2}), ({_T2} dot {_rot_matrix::3})), vector(({_T3} dot {_rot_matrix::1}), ({_T3} dot {_rot_matrix::2}), ({_T3} dot {_rot_matrix::3}))
+
+function get_corners(pos: vector, rot_matrix: vectors, halfExtent: vector) :: vectors:
+	set {_hx} to x of {_halfExtent}
+	set {_hy} to y of {_halfExtent}
+	set {_hz} to z of {_halfExtent}
+	for {_i}, {_v} in ((-1 * {_halfExtent}), vector({_hx}, -1*{_hy}, -1*{_hz}), vector({_hx}, {_hy}, -1*{_hz}), vector(-1*{_hx}, {_hy}, -1*{_hz}), vector(-1*{_hx}, -1*{_hy}, {_hz}), vector({_hx}, -1*{_hy}, {_hz}), {_halfExtent}, vector(-1*{_hx}, {_hy}, {_hz})):
+		set {_world_corners::%{_i}%} to vector(({_rot_matrix::1} dot {_v}), ({_rot_matrix::2} dot {_v}), ({_rot_matrix::3} dot {_v})) + {_pos}
+	return {_world_corners::*}
+		
+function sat_overlap(c1:string, c2:string) :: objects:
+	set {_Ax} to vector(x of {-phys.cubes::%{_c1}%::R1}, x of {-phys.cubes::%{_c1}%::R2}, x of {-phys.cubes::%{_c1}%::R3})
+	set {_Ay} to vector(y of {-phys.cubes::%{_c1}%::R1}, y of {-phys.cubes::%{_c1}%::R2}, y of {-phys.cubes::%{_c1}%::R3})
+	set {_Az} to vector(z of {-phys.cubes::%{_c1}%::R1}, z of {-phys.cubes::%{_c1}%::R2}, z of {-phys.cubes::%{_c1}%::R3})
+	set {_Bx} to vector(x of {-phys.cubes::%{_c2}%::R1}, x of {-phys.cubes::%{_c2}%::R2}, x of {-phys.cubes::%{_c2}%::R3})
+	set {_By} to vector(y of {-phys.cubes::%{_c2}%::R1}, y of {-phys.cubes::%{_c2}%::R2}, y of {-phys.cubes::%{_c2}%::R3})
+	set {_Bz} to vector(z of {-phys.cubes::%{_c2}%::R1}, z of {-phys.cubes::%{_c2}%::R2}, z of {-phys.cubes::%{_c2}%::R3})
+
+	set {_d} to {-phys.cubes::%{_c1}%::pos} - {-phys.cubes::%{_c2}%::pos}
+	
+	for {_axis} in ({_Ax}, {_Ay}, {_Az}, {_Bx}, {_By}, {_Bz}, ({_Ax} cross {_Bx}), ({_Ax} cross {_By}), ({_Ax} cross {_Bz}), ({_Ay} cross {_Bx}), ({_Ay} cross {_By}), ({_Ay} cross {_Bz}), ({_Az} cross {_Bx}), ({_Az} cross {_By}), ({_Az} cross {_Bz})):
+		continue if (squared length of {_axis}) <= 1e-6
+		set {_axis} to normalized {_axis}
+		set {_dDotAxis} to {_d} dot {_axis}
+		set {_overlap} to abs(x of {-phys.cubes::%{_c1}%::halfExtent} * ({_Ax} dot {_axis})) + abs(y of {-phys.cubes::%{_c1}%::halfExtent} * ({_Ay} dot {_axis})) + abs(z of {-phys.cubes::%{_c1}%::halfExtent} * ({_Az} dot {_axis})) + abs(x of {-phys.cubes::%{_c2}%::halfExtent} * ({_Bx} dot {_axis})) + abs(y of {-phys.cubes::%{_c2}%::halfExtent} * ({_By} dot {_axis})) + abs(z of {-phys.cubes::%{_c2}%::halfExtent} * ({_Bz} dot {_axis})) - abs({_dDotAxis})
+		
+		if {_overlap} < 0:
+			return false, 0, {-vec3.ZERO}
+			
+		if {_overlap} < ({_bestDepth} ? infinity value):
+			set {_bestDepth} to {_overlap}
+			set {_bestNormal} to {_axis} if {_dDotAxis} >= 0, else ({_axis} * -1)
+			
+	return true, {_bestDepth}, ({_bestNormal} ? {-vec3.ZERO})
+
+function get_contact_points(AIdx:string, BIdx:string, normal: vector) :: objects:
+	set {_minA} to infinity value
+	for {_corner} in {-phys.cubes::%{_AIdx}%::corners::*}:
+		set {_proj} to ({_corner} dot {_normal})
+		if {_proj} < {_minA}:
+			set {_minA} to {_proj}
+			
+	for {_corner} in {-phys.cubes::%{_AIdx}%::corners::*}:
+		if ({_corner} dot {_normal}) <= {_minA} + 0.01:
+			add {_corner} to {_supportA::*}
+
+	set {_maxB} to -infinity value
+	for {_corner} in {-phys.cubes::%{_BIdx}%::corners::*}:
+		set {_proj} to ({_corner} dot {_normal})
+		if {_proj} > {_maxB}:
+			set {_maxB} to {_proj}
+
+	for {_corner} in {-phys.cubes::%{_BIdx}%::corners::*}:
+		if ({_corner} dot {_normal}) >= {_maxB} - 0.01:
+			add {_corner} to {_supportB::*}
+
+	return {_supportA::*}, {_supportB::*}
+
+# boolean makes skript await code whenever the function is called
+function find_contacts() :: boolean:
+	for index {_contact} in {-phys.contacts::*}:
+		clear {-phys.contacts::%{_contact}%::*}
+		clear {-phys.contacts::%{_contact}%}
+	clear {-phys.contacts::*}
+	
+	# Cube vs Ground
+	for index {_cube} in {-phys.cubes::*}:
+		continue if (y of {-phys.cubes::%{_cube}%::pos}) >= ({-phys.cubes::%{_cube}%::vLength} + {@COLLISION_MARGIN})	
+		for {_point} in {-phys.cubes::%{_cube}%::corners::*}:
+			set {_depth} to -1 * (y of {_point}) + {@COLLISION_MARGIN}
+			if {_depth} > 0:
+				set {_contact} to random uuid
+				set {-phys.contacts::%{_contact}%::bodyA} to {_cube}
+				set {-phys.contacts::%{_contact}%::point} to {_point}
+				set {-phys.contacts::%{_contact}%::normal} to {-vec3.PLANE_Y}
+				set {-phys.contacts::%{_contact}%::depth} to {_depth}
+	
+	# Cybe vs Cube
+	for index {_c1} in {-phys.cubes::*}:
+		for index {_c2} in {-phys.cubes::*}:
+			if any:
+				{_c1} = {_c2}
+				{_checked::%{_c2}%.%{_c1}%} = true
+				{_checked::%{_c1}%.%{_c2}%} = true
+				(squared length of ({-phys.cubes::%{_c1}%::pos} - {-phys.cubes::%{_c2}%::pos})) > ({-phys.cubes::%{_c1}%::vLength} + {-phys.cubes::%{_c2}%::vLength} + 0.1)^2
+			then:
+				continue
+			set {_checked::%{_c2}%.%{_c1}%}, {_checked::%{_c1}%.%{_c2}%} to true
+			
+			set {_sat_overlap::*} to sat_overlap({_c1}, {_c2})
+			continue if {_sat_overlap::1} = false
+			
+			for {_point} in get_contact_points({_c1}, {_c2}, {_sat_overlap::3}):
+				set {_contact} to random uuid
+				set {-phys.contacts::%{_contact}%::bodyA} to {_c1}
+				set {-phys.contacts::%{_contact}%::bodyB} to {_c2}
+				set {-phys.contacts::%{_contact}%::point} to {_point}
+				set {-phys.contacts::%{_contact}%::normal} to {_sat_overlap::3} # normal
+				set {-phys.contacts::%{_contact}%::depth} to {_sat_overlap::2}  # depth
+
+	return true
+
+function solve_contact(contact: string) :: boolean:
+	set {_Aidx} to {-phys.contacts::%{_contact}%::bodyA}
+	set {_Bidx} to {-phys.contacts::%{_contact}%::bodyB} # none for ground
+
+	set {_rA} to {-phys.contacts::%{_contact}%::point} - {-phys.cubes::%{_Aidx}%::pos}
+	set {_rB} to {-phys.contacts::%{_contact}%::point} - {-phys.cubes::%{_Bidx}%::pos}
+	set {_vn} to (({-phys.cubes::%{_Aidx}%::vel} + ({-phys.cubes::%{_Aidx}%::omega} cross {_rA})) - ({-phys.cubes::%{_Bidx}%::vel} + ({-phys.cubes::%{_Bidx}%::omega} cross {_rB}))) dot {-phys.contacts::%{_contact}%::normal}
+
+	if {_vn} < 0:
+		set {_rnA} to {_rA} cross {-phys.contacts::%{_contact}%::normal}
+		set {_rnB} to {_rB} cross {-phys.contacts::%{_contact}%::normal}
+
+		set {_inv_mass_total} to {-phys.cubes::%{_Aidx}%::inv_mass} + {-phys.cubes::%{_Bidx}%::inv_mass} + ({-phys.cubes::%{_Aidx}%::IW1} dot {_rnA}) * (x of {_rnA}) + ({-phys.cubes::%{_Aidx}%::IW2} dot {_rnA}) * (y of {_rnA}) + ({-phys.cubes::%{_Aidx}%::IW3} dot {_rnA}) * (z of {_rnA}) + ({-phys.cubes::%{_Bidx}%::IW1} dot {_rnB}) * (x of {_rnB}) + ({-phys.cubes::%{_Bidx}%::IW2} dot {_rnB}) * (y of {_rnB}) + ({-phys.cubes::%{_Bidx}%::IW3} dot {_rnB}) * (z of {_rnB})
+
+		if {_inv_mass_total} > 1e-9: 
+			set {_jn} to max(0, (1 / {_inv_mass_total}) * ((-1 - {@RESTITUTION}) * {_vn} + ({-phys.bias} * max(0.0, {-phys.contacts::%{_contact}%::depth} - 0.005))))
+			set {_impulse_n} to {-phys.contacts::%{_contact}%::normal} * {_jn}
+			set {-phys.cubes::%{_Aidx}%::vel} to ({-phys.cubes::%{_Aidx}%::vel} + ({_impulse_n} * {-phys.cubes::%{_Aidx}%::inv_mass}))
+			set {_tauA} to {_rA} cross {_impulse_n}
+			set {-phys.cubes::%{_Aidx}%::omega} to ({-phys.cubes::%{_Aidx}%::omega} + vector(({-phys.cubes::%{_Aidx}%::IW1} dot {_tauA}), ({-phys.cubes::%{_Aidx}%::IW2} dot {_tauA}), ({-phys.cubes::%{_Aidx}%::IW3} dot {_tauA})))
+
+			if {_Bidx} is set:
+				set {-phys.cubes::%{_Bidx}%::vel} to ({-phys.cubes::%{_Bidx}%::vel} - ({_impulse_n} * {-phys.cubes::%{_Bidx}%::inv_mass}))
+				set {_tauB} to {_rB} cross {_impulse_n}
+				set {-phys.cubes::%{_Bidx}%::omega} to ({-phys.cubes::%{_Bidx}%::omega} - vector(({-phys.cubes::%{_Bidx}%::IW1} dot {_tauB}), ({-phys.cubes::%{_Bidx}%::IW2} dot {_tauB}), ({-phys.cubes::%{_Bidx}%::IW3} dot {_tauB})))
+		
+	set {_rel_vel} to ({-phys.cubes::%{_Aidx}%::vel} + ({-phys.cubes::%{_Aidx}%::omega} cross {_rA})) - (({-phys.cubes::%{_Bidx}%::omega} cross {_rB}) + {-phys.cubes::%{_Bidx}%::vel})
+	set {_tangent} to ({_rel_vel} - ({-phys.contacts::%{_contact}%::normal} * ({_rel_vel} dot {-phys.contacts::%{_contact}%::normal})))
+	if (squared length of {_tangent}) > 1e-12:
+		set {_t_dir} to normalized {_tangent}
+		set {_rtA} to {_rA} cross {_t_dir}
+		set {_rtB} to {_rB} cross {_t_dir}
+		set {_inv_mass_t} to {-phys.cubes::%{_Aidx}%::inv_mass} + {-phys.cubes::%{_Bidx}%::inv_mass} + ({-phys.cubes::%{_Aidx}%::IW1} dot {_rtA}) * (x of {_rtA}) + ({-phys.cubes::%{_Aidx}%::IW2} dot {_rtA}) * (y of {_rtA}) + ({-phys.cubes::%{_Aidx}%::IW3} dot {_rtA}) * (z of {_rtA}) + ({-phys.cubes::%{_Bidx}%::IW1} dot {_rtB}) * (x of {_rtB}) + ({-phys.cubes::%{_Bidx}%::IW2} dot {_rtB}) * (y of {_rtB}) + ({-phys.cubes::%{_Bidx}%::IW3} dot {_rtB}) * (z of {_rtB})
+	
+		if {_inv_mass_t} > 1e-9:
+			set {_impulse_t} to {_t_dir} * clamp(((-1 * ({_rel_vel} dot {_t_dir})) / {_inv_mass_t}), (-{@FRICTION_COEFF} * {_jn}), ({@FRICTION_COEFF} * {_jn}))
+			set {-phys.cubes::%{_Aidx}%::vel} to ({-phys.cubes::%{_Aidx}%::vel} + ({_impulse_t} * {-phys.cubes::%{_Aidx}%::inv_mass}))
+	
+			set {_tauAt} to {_rA} cross {_impulse_t}
+			set {-phys.cubes::%{_Aidx}%::omega} to ({-phys.cubes::%{_Aidx}%::omega} + vector(({-phys.cubes::%{_Aidx}%::IW1} dot {_tauAt}), ({-phys.cubes::%{_Aidx}%::IW2} dot {_tauAt}), ({-phys.cubes::%{_Aidx}%::IW3} dot {_tauAt})))
+	
+			if {_Bidx} is set:
+				set {-phys.cubes::%{_Bidx}%::vel} to ({-phys.cubes::%{_Bidx}%::vel} - ({_impulse_t} * {-phys.cubes::%{_Bidx}%::inv_mass}))
+				set {_tauBt} to {_rB} cross {_impulse_t}
+				set {-phys.cubes::%{_Bidx}%::omega} to ({-phys.cubes::%{_Bidx}%::omega} - vector(({-phys.cubes::%{_Bidx}%::IW1} dot {_tauBt}), ({-phys.cubes::%{_Bidx}%::IW2} dot {_tauBt}), ({-phys.cubes::%{_Bidx}%::IW3} dot {_tauBt})))
+
+	return true
+	
+function step_physics() :: boolean:
+	for index {_cube} in {-phys.cubes::*}:
+		set {-phys.cubes::%{_cube}%::vel} to {-phys.cubes::%{_cube}%::vel} + {-phys.gravity}
+		
+		set {_R::*} to get_rotation_matrix({-phys.cubes::%{_cube}%::quat})
+		set {-phys.cubes::%{_cube}%::R1} to {_R::1}
+		set {-phys.cubes::%{_cube}%::R2} to {_R::2}
+		set {-phys.cubes::%{_cube}%::R3} to {_R::3}
+		
+		set {-phys.cubes::%{_cube}%::corners::*} to get_corners({-phys.cubes::%{_cube}%::pos}, {_R::*}, {-phys.cubes::%{_cube}%::halfExtent})
+		
+		set {_IW::*} to get_inverse_inertia_world({-phys.cubes::%{_cube}%::inv_i}, {_R::*})
+		set {-phys.cubes::%{_cube}%::IW1} to {_IW::1}
+		set {-phys.cubes::%{_cube}%::IW2} to {_IW::2}
+		set {-phys.cubes::%{_cube}%::IW3} to {_IW::3}
+
+	set {_await} to find_contacts()
+	set {_idx::*} to indexes of {-phys.contacts::*}
+	set {_iterations} to {@SOLVER_ITERATIONS} # get rid of the annoying warning when this = 1
+	loop {_iterations} times:
+		for value {_contact} in (shuffled {_idx::*}):
+			solve_contact({_contact})
+
+	for index {_cube} in {-phys.cubes::*}:
+		set {-phys.cubes::%{_cube}%::pos} to ({-phys.cubes::%{_cube}%::pos} + ({-phys.cubes::%{_cube}%::vel} * {-phys.dt}))
+		set {_dq} to multiply_quaternions(quaternion(0, (x of {-phys.cubes::%{_cube}%::omega}), (y of {-phys.cubes::%{_cube}%::omega}), (z of {-phys.cubes::%{_cube}%::omega})), {-phys.cubes::%{_cube}%::quat})
+		set {_w} to (w of {-phys.cubes::%{_cube}%::quat}) + ((w of {_dq}) * {-phys.halfdt})
+		set {_x} to (x of {-phys.cubes::%{_cube}%::quat}) + ((x of {_dq}) * {-phys.halfdt})
+		set {_y} to (y of {-phys.cubes::%{_cube}%::quat}) + ((y of {_dq}) * {-phys.halfdt})
+		set {_z} to (z of {-phys.cubes::%{_cube}%::quat}) + ((z of {_dq}) * {-phys.halfdt})
+		set {_qlen} to ({_w}^2 + {_x}^2 + {_y}^2 + {_z}^2)^0.5
+		set {-phys.cubes::%{_cube}%::quat} to quaternion(({_w} / {_qlen}), ({_x} / {_qlen}), ({_y} / {_qlen}), ({_z} / {_qlen}))
+	return true
+
+function create_cube(pos: vector, size: vector = {-vec3.ONE}, mass: number = 1.0) :: string:
+	set {_idx} to random uuid
+	set {-phys.cubes::%{_idx}%::pos} to {_pos}
+	set {-phys.cubes::%{_idx}%::vel} to {-vec3.ZERO}
+	set {-phys.cubes::%{_idx}%::quat} to {-quat.IDENTITY}
+	set {-phys.cubes::%{_idx}%::omega} to {-vec3.ZERO}
+	set {-phys.cubes::%{_idx}%::mass} to {_mass}
+	set {-phys.cubes::%{_idx}%::inv_mass} to (1 / {_mass})
+	set {-phys.cubes::%{_idx}%::size} to {_size}
+	set {-phys.cubes::%{_idx}%::halfExtent} to {_size} / 2
+	set {-phys.cubes::%{_idx}%::vLength} to vector length of {-phys.cubes::%{_idx}%::halfExtent}
+	set {-phys.cubes::%{_idx}%::inv_i} to 12.0 / ({_mass} * vector(((y of {_size})^2 + (z of {_size})^2), ((x of {_size})^2 + (z of {_size})^2), ((x of {_size})^2 + (y of {_size})^2)))
+	
+	spawn item display at (location of {_pos} in world("world")):
+		set item of entity to (random element of {-list.blocks::*})
+		set display transformation scale of entity to {_size}
+		set interpolation duration of entity to 1 tick
+		set teleport duration of entity to 1 tick
+		set {-phys.cubes::%{_idx}%} to entity
+
+	return {_idx}
