@@ -15,9 +15,10 @@
 # ------------------------------------------------------------- #
 
 options:
-	refresh-rate: 50             # in ms, keep as a multiple of 50 (because tick based updates)
-	map-id: -1                   # the id of the map that will be assigned to show the stats
-	background-color: "#000000"  # the background color (hex colors only!)
+	refresh-rate: 50               # in ms, keep as a multiple of 50 (because tick based updates)
+	map-id: -1                     # the id of the map that will be assigned to show the stats
+	background-color: "#000000"    # the background color (hex colors only!)
+    font-size: 10                  # best to keep 10
 
 import:
 	me.lucko.spark.api.SparkProvider
@@ -63,7 +64,7 @@ on load:
 		set {_img} to new BufferedImage(128, 128, BufferedImage.TYPE_INT_ARGB)
 		set {_g} to {_img}.createGraphics()
 		{_g}.setBackground({_bg})
-		{_g}.setFont(new Font("Arial", Font.PLAIN, 9))
+		{_g}.setFont(new Font("Arial", Font.PLAIN, {@font-size}))
 		{_g}.setColor({_bg})
 		{_g}.fillRect(0, 0, 128, 128)
 		
