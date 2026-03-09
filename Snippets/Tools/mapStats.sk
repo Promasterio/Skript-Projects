@@ -1,0 +1,107 @@
+# ------------------------------------------------------------- #
+#                                                               #
+#                       Map Stats Tool                          #
+#                                                               #
+# ------------------------------------------------------------- #
+#                                                               #
+#    Check the server's statistics on a map                     #
+#    Less efficient than utilizing sidebar/bossbar              #
+#    Definitely cooler and cleaner to read though               #
+#                                                               #
+#    -> Made by: Promasterio                                    #
+#    -> Dependencies: Skript (v2.14.3), Skript-reflect (v2.6.3) #
+#    -> Server Software: Paper (v1.21.11)                       #
+#                                                               #
+# ------------------------------------------------------------- #
+
+options:
+	refresh-rate: 50             # in ms, keep as a multiple of 50 (because tick based updates)
+	map-id: -1                   # the id of the map that will be assigned to show the stats
+	background-color: "#000000"  # the background color (hex colors only!)
+
+import:
+	me.lucko.spark.api.SparkProvider
+	net.minecraft.world.level.saveddata.maps.MapId
+	net.minecraft.world.level.saveddata.maps.MapItemSavedData$MapPatch
+	net.minecraft.network.protocol.game.ClientboundMapItemDataPacket
+	org.bukkit.Bukkit
+	org.bukkit.map.MapPalette
+	java.awt.Color
+	java.awt.Font
+	java.awt.image.BufferedImage
+	java.awt.AlphaComposite
+	java.lang.Thread
+	java.lang.Runtime
+	
+command /mapstats:
+	permission: op
+	trigger:
+		set player's offhand item to {-mapstats.item}
+		run section {-mapstats.run} async if {-mapstats.current} isn't set
+		set {-mapstats.viewers::%player's uuid%} to player.getHandle().connection
+		
+on unload:
+	clear {-mapstats.current}
+
+on load:
+	set {-mapstats.item} to filled map named "&6Map Stats"
+	set {_meta} to {-mapstats.item}.getItemMeta()
+	{_meta}.setMapId({@map-id})
+	{-mapstats.item}.setItemMeta({_meta})
+
+	create section stored in {-mapstats.run}:
+		Thread.currentThread().setName("Skript - Map Stats")
+		set {-mapstats.current}, {_now} to now
+		set {_mapId} to new MapId({@map-id})
+		
+		set {_runtime} to Runtime.getRuntime()
+		set {_spark} to SparkProvider.get()
+		set {_cpuSys} to {_spark}.cpuSystem()
+		set {_tpsSys} to {_spark}.tps()
+		set {_bg} to Color.decode({@background-color})
+
+		set {_img} to new BufferedImage(128, 128, BufferedImage.TYPE_INT_ARGB)
+		set {_g} to {_img}.createGraphics()
+		{_g}.setBackground({_bg})
+		{_g}.setFont(new Font("Arial", Font.PLAIN, 9))
+		{_g}.setColor({_bg})
+		{_g}.fillRect(0, 0, 128, 128)
+		
+		set {_totalMem} to {_runtime}.totalMemory() / 1073741824
+		set {_totalMemScale} to 90 / {_totalMem}
+
+		while {-mapstats.current} = {_now}:
+			if {-mapstats.viewers::*} isn't set:
+				clear {-mapstats.current}
+				stop
+
+			set {_mspt} to Bukkit.getAverageTickTime()
+			set {_cpu} to {_cpuSys}.poll()[0]
+			set {_usedMem} to {_totalMem} - ({_runtime}.freeMemory() / 1073741824)
+
+			{_g}.copyArea(1, 39, 127, 89, -1, 0)
+			{_g}.clearRect(127, 39, 1, 89)
+			{_g}.clearRect(0, 0, 128, 38)
+			{_g}.setColor(Color.RED)
+			{_g}.drawLine(127, 128, 127, (128 - {_usedMem} * {_totalMemScale}))
+			{_g}.drawString("RAM: %{_usedMem}% / %{_totalMem}%GB", 4, 10)
+			{_g}.setColor(Color.YELLOW)
+			{_g}.drawLine(127, 128, 127, (128 - {_mspt} * 1.8)) if {_mspt} < 49.5, else {_g}.drawLine(127, 128, 127, 39)
+			{_g}.drawString("MSPT: %{_mspt}%ms", 4, 21)
+			{_g}.setColor(Color.BLUE)
+			{_g}.drawLine(127, 128, 127, (128 - {_cpu} * 90))
+			{_g}.drawString("CPU: %{_cpu}*100%%%", 4, 32)
+			{_g}.setColor(Color.GREEN)
+			{_g}.drawString("TPS: %{_tpsSys}.poll()[0]%", 72, 32)
+			
+			set {_packet} to new ClientboundMapItemDataPacket({_mapId}, 0, false, null, new MapPatch(0, 0, 128, 128, MapPalette.imageToBytes({_img})))
+
+			loop {-mapstats.viewers::*}:
+				if loop-value.isDisconnected():
+					clear {-mapstats.viewers::%loop-index%}
+				else:
+					loop-value.send({_packet})
+					
+			Thread.sleep({@refresh-rate})
+			
+	run section {-mapstats.run} async if {-mapstats.viewers::*} is set
