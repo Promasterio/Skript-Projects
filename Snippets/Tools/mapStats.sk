@@ -18,7 +18,7 @@ options:
 	refresh-rate: 50               # in ms, keep as a multiple of 50 (because tick based updates)
 	map-id: -1                     # the id of the map that will be assigned to show the stats
 	background-color: "#000000"    # the background color (hex colors only!)
-    font-size: 10                  # best to keep 10
+	font-size: 10                  # best to keep 10
 
 import:
 	me.lucko.spark.api.SparkProvider
